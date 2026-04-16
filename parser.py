@@ -28,6 +28,7 @@ from patterns import (
     PO_BOX_RE,
     STANDARD_STREET_RE,
     ROUTE_STREET_RE,
+    UNIT_ONLY_RE,
 )
 
 
@@ -238,13 +239,16 @@ def extract_street_candidate(text: str) -> str:
 
 def parse_street(fields: list[dict], geo: dict) -> dict:
     """
-    Parse a street candidate anchored to the geographic cluster.
+    Parse a street candidate.
 
     Strategy:
-    - if geo fields were found, look immediately left of the leftmost geo field
-    - only accept strong street patterns for now
+    1. If geo fields were found, first look immediately left of the geo cluster.
+    2. If that fails, scan all remaining fields from right to left and take the
+       first strong street candidate.
 
-    Returns a dictionary with street value and metadata.
+    This allows rows like:
+    NAME | NAME | STREET
+    to still parse a street even when no city/state/zip is present.
     """
     if not fields:
         return {
@@ -254,40 +258,37 @@ def parse_street(fields: list[dict], geo: dict) -> dict:
             "confidence": 0.0,
         }
 
-    geo_field_indices = geo.get("field_indices", [])
-    if not geo_field_indices:
-        return {
-            "PARSED_STREET": "",
-            "field_indices": [],
-            "parse_type": "",
-            "confidence": 0.0,
-        }
+    geo_field_indices = set(geo.get("field_indices", []))
 
-    leftmost_geo_idx = min(geo_field_indices)
+    # Pass 1: field immediately left of geo cluster
+    if geo_field_indices:
+        leftmost_geo_idx = min(geo_field_indices)
 
-    # Find the field object whose parse-column idx is immediately left of the geo cluster
-    left_candidate = None
-    for field in fields:
-        if field["idx"] == leftmost_geo_idx - 1:
-            left_candidate = field
-            break
+        for field in fields:
+            if field["idx"] == leftmost_geo_idx - 1:
+                street = extract_street_candidate(field["text"])
+                if street:
+                    return {
+                        "PARSED_STREET": street,
+                        "field_indices": [field["idx"]],
+                        "parse_type": "LEFT_OF_GEO",
+                        "confidence": 0.95,
+                    }
+                break
 
-    if left_candidate is None:
-        return {
-            "PARSED_STREET": "",
-            "field_indices": [],
-            "parse_type": "",
-            "confidence": 0.0,
-        }
+    # Pass 2: fallback scan from right to left across all non-geo fields
+    for field in reversed(fields):
+        if field["idx"] in geo_field_indices:
+            continue
 
-    street = extract_street_candidate(left_candidate["text"])
-    if street:
-        return {
-            "PARSED_STREET": street,
-            "field_indices": [left_candidate["idx"]],
-            "parse_type": "LEFT_OF_GEO",
-            "confidence": 0.95,
-        }
+        street = extract_street_candidate(field["text"])
+        if street:
+            return {
+                "PARSED_STREET": street,
+                "field_indices": [field["idx"]],
+                "parse_type": "RIGHTMOST_STREET_FALLBACK",
+                "confidence": 0.90,
+            }
 
     return {
         "PARSED_STREET": "",
@@ -296,6 +297,157 @@ def parse_street(fields: list[dict], geo: dict) -> dict:
         "confidence": 0.0,
     }
 
+def parse_geo_left_of_street(fields: list[dict], street: dict) -> dict:
+    """
+    Parse geo fields immediately left of the chosen street field.
+
+    Supported shapes:
+    - CITY STATE ZIP | STREET
+    - STATE ZIP | STREET   (state+zip only, city blank)
+    - CITY STATE | STREET
+    - CITY | STATE | ZIP | STREET
+    """
+    if not fields or not street.get("field_indices"):
+        return {
+            "PARSED_CITY": "",
+            "PARSED_STATE": "",
+            "PARSED_ZIP": "",
+            "PARSED_COUNTRY": "",
+            "field_indices": [],
+            "parse_type": "",
+            "confidence": 0.0,
+        }
+
+    street_idx = street["field_indices"][0]
+
+    field_map = {f["idx"]: f for f in fields}
+
+    left1 = field_map.get(street_idx - 1)
+    left2 = field_map.get(street_idx - 2)
+    left3 = field_map.get(street_idx - 3)
+
+    # 1 field: CITY STATE ZIP
+    if left1:
+        m = CITY_STATE_ZIP_RE.match(left1["text"])
+        if m:
+            return {
+                "PARSED_CITY": m.group("city").strip(),
+                "PARSED_STATE": m.group("state").strip(),
+                "PARSED_ZIP": m.group("zip").strip(),
+                "PARSED_COUNTRY": "",
+                "field_indices": [left1["idx"]],
+                "parse_type": "LEFT_OF_STREET__CITY_STATE_ZIP",
+                "confidence": 0.96,
+            }
+
+    # 1 field: STATE ZIP
+    if left1:
+        m = STATE_ZIP_RE.match(left1["text"])
+        if m:
+            return {
+                "PARSED_CITY": "",
+                "PARSED_STATE": m.group("state").strip(),
+                "PARSED_ZIP": m.group("zip").strip(),
+                "PARSED_COUNTRY": "",
+                "field_indices": [left1["idx"]],
+                "parse_type": "LEFT_OF_STREET__STATE_ZIP",
+                "confidence": 0.90,
+            }
+
+    # 1 field: CITY STATE
+    if left1:
+        m = CITY_STATE_RE.match(left1["text"])
+        if m:
+            return {
+                "PARSED_CITY": m.group("city").strip(),
+                "PARSED_STATE": m.group("state").strip(),
+                "PARSED_ZIP": "",
+                "PARSED_COUNTRY": "",
+                "field_indices": [left1["idx"]],
+                "parse_type": "LEFT_OF_STREET__CITY_STATE",
+                "confidence": 0.90,
+            }
+
+    # 2 fields: CITY STATE | ZIP
+    if left2 and left1:
+        m_city_state = CITY_STATE_RE.match(left2["text"])
+        m_zip = ZIP_RE.fullmatch(left1["text"])
+        if m_city_state and m_zip:
+            return {
+                "PARSED_CITY": m_city_state.group("city").strip(),
+                "PARSED_STATE": m_city_state.group("state").strip(),
+                "PARSED_ZIP": m_zip.group(0).strip(),
+                "PARSED_COUNTRY": "",
+                "field_indices": [left2["idx"], left1["idx"]],
+                "parse_type": "LEFT_OF_STREET__CITY_STATE__ZIP",
+                "confidence": 0.96,
+            }
+
+    # 2 fields: CITY | STATE ZIP
+    if left2 and left1:
+        m_state_zip = STATE_ZIP_RE.match(left1["text"])
+        if left2["text"] and m_state_zip:
+            return {
+                "PARSED_CITY": left2["text"].strip(),
+                "PARSED_STATE": m_state_zip.group("state").strip(),
+                "PARSED_ZIP": m_state_zip.group("zip").strip(),
+                "PARSED_COUNTRY": "",
+                "field_indices": [left2["idx"], left1["idx"]],
+                "parse_type": "LEFT_OF_STREET__CITY__STATE_ZIP",
+                "confidence": 0.95,
+            }
+
+    # 3 fields: CITY | STATE | ZIP
+    if left3 and left2 and left1:
+        m_state = STATE_ONLY_RE.match(left2["text"])
+        m_zip = ZIP_RE.fullmatch(left1["text"])
+        if left3["text"] and m_state and m_zip:
+            return {
+                "PARSED_CITY": left3["text"].strip(),
+                "PARSED_STATE": m_state.group("state").strip(),
+                "PARSED_ZIP": m_zip.group(0).strip(),
+                "PARSED_COUNTRY": "",
+                "field_indices": [left3["idx"], left2["idx"], left1["idx"]],
+                "parse_type": "LEFT_OF_STREET__CITY__STATE__ZIP",
+                "confidence": 0.98,
+            }
+
+    return {
+        "PARSED_CITY": "",
+        "PARSED_STATE": "",
+        "PARSED_ZIP": "",
+        "PARSED_COUNTRY": "",
+        "field_indices": [],
+        "parse_type": "",
+        "confidence": 0.0,
+    }
+
+def append_unit_left_of_street(fields: list[dict], street: dict) -> dict:
+    """
+    If the field immediately left of the parsed street is a standalone unit,
+    append it to the street.
+    """
+    if not fields or not street.get("field_indices"):
+        return street
+
+    street_idx = street["field_indices"][0]
+    field_map = {f["idx"]: f for f in fields}
+    left_field = field_map.get(street_idx - 1)
+
+    if not left_field:
+        return street
+
+    m = UNIT_ONLY_RE.match(left_field["text"])
+    if not m:
+        return street
+
+    updated_street = street.copy()
+    updated_street["PARSED_STREET"] = f'{street["PARSED_STREET"]} {m.group("unit").strip()}'.strip()
+    updated_street["field_indices"] = [left_field["idx"], street_idx]
+    updated_street["parse_type"] = f'{street.get("parse_type", "STREET")}__UNIT_LEFT'
+    updated_street["confidence"] = min(street.get("confidence", 0.90), 0.93)
+
+    return updated_street
 
 def parse_row(row) -> dict:
     """
@@ -304,12 +456,18 @@ def parse_row(row) -> dict:
     Current version:
     - parses the geographic cluster
     - parses a street candidate immediately left of that geo cluster
+    - parses geo clusters to the left of street
     """
     result = empty_parsed_result()
     fields = build_parse_fields(row, config.parse_columns)
 
     geo = parse_geo_cluster(fields)
     street = parse_street(fields, geo)
+    street = append_unit_left_of_street(fields, street)
+
+    # If trailing geo wasn't found, try geo immediately left of street
+    if not geo["field_indices"] and street["field_indices"]:
+        geo = parse_geo_left_of_street(fields, street)
 
     result["PARSED_STREET"] = street["PARSED_STREET"]
     result["PARSED_CITY"] = geo["PARSED_CITY"]

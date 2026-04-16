@@ -47,7 +47,11 @@ def main():
 
     parsed_df = parse_data(df)
 
-    parsed_df.to_csv('test.csv', index=False)
+    output_file_name = f"PARSED_{file_path.name}"
+
+    output_file_path = Path(file_path.parent, output_file_name)
+
+    parsed_df.to_csv(output_file_path, index=False)
 
 
 if __name__ == "__main__":

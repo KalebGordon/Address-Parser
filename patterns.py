@@ -39,7 +39,7 @@ CITY_STATE_ZIP_RE = re.compile(
 )
 
 PO_BOX_RE = re.compile(
-    r"\b(?:P\s*\.?\s*O\s*\.?\s*|POST\s+OFFICE\s+)?BOX\s+[A-Z0-9\-]+\b"
+    r"\b(?:P\s*\.?\s*O\s*\.?|POST\s+OFFICE)\s+BOX\s+[A-Z0-9\-]+\b"
 )
 
 DIRECTIONALS = r"(?:N|S|E|W|NE|NW|SE|SW|NORTH|SOUTH|EAST|WEST)"
@@ -52,7 +52,7 @@ STREET_SUFFIXES = (
     r"ST(?:REET)?|AVE(?:NUE)?|RD|ROAD|DR(?:IVE)?|LN|LANE|BLVD|BOULEVARD|"
     r"CIR(?:CLE)?|CT|COURT|CV|COVE|TRL|TRAIL|WAY|PL|PLACE|TER|TERRACE|"
     r"PKWY|PARKWAY|PIKE|PATH|LOOP|POINTE|HWY|HIGHWAY|FWY|FREEWAY|"
-    r"EXPY|EXPRESSWAY|TOLLWAY|RDG"
+    r"EXPY|EXPRESSWAY|TOLLWAY|RDG|TRCE|TRACE|XING|CROSSING"
 )
 
 STANDARD_STREET_RE = re.compile(
@@ -78,12 +78,14 @@ ROUTE_STREET_RE = re.compile(
     \s+
     (?:(?:{DIRECTIONALS})\s+)?
     (?:
-        FM|RM|RR|
+        FM|RM|RR|HCR|
         INTERSTATE|I|
         US\s+HIGHWAY|U\.?S\.?\s+HIGHWAY|
         STATE\s+HIGHWAY|
+        FARM\s+ROAD|
         HIGHWAY|HWY|
-        COUNTY\s+ROAD|CR
+        COUNTY\s+ROAD|CR|
+        ROAD
     )
     \s+
     \d+[A-Z\-]*
@@ -92,4 +94,8 @@ ROUTE_STREET_RE = re.compile(
     \b
     """,
     re.VERBOSE,
+)
+
+UNIT_ONLY_RE = re.compile(
+    rf"^\s*(?P<unit>(?:{UNIT_DESIGNATORS})\s*[A-Z0-9\-#]+)\s*$"
 )
