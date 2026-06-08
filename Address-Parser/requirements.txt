@@ -1,0 +1,6 @@
+pandas
+tqdm
+openpyxl
+pandas>=2.0
+tqdm>=4.65
+openpyxl>=3.1
